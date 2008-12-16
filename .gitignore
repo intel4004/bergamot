@@ -1,0 +1,5 @@
+agent/native/.dep.inc
+agent/native/build
+agent/native/dist
+test/testapp/build
+

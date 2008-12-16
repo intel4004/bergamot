@@ -10,5 +10,9 @@
 		<ant antfile="test/testapp/build.xml" target="clean" inheritAll="false" />
 	</target>
 
+	<target name="run" depends="compile" description="run test app" >
+		<ant antfile="test/testapp/build.xml" target="run" inheritAll="false" />
+	</target>
+
 </project>
 
