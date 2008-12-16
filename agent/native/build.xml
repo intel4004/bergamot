@@ -1,0 +1,15 @@
+<project name="bergamot" default="compile" basedir=".">
+
+	<target name="compile">
+		<exec executable="make">
+		</exec>
+	</target>
+
+	<target name="clean">
+		<exec executable="make">
+			<arg value="clean"/>
+		</exec>
+	</target>
+
+</project>
+

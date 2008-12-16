@@ -1,0 +1,14 @@
+<project name="bergamot" default="compile" basedir=".">
+
+	<target name="compile" description="compile sub projects" >
+		<ant antfile="agent/native/build.xml" target="compile" inheritAll="false" />
+		<ant antfile="test/testapp/build.xml" target="compile" inheritAll="false" />
+	</target>
+
+	<target name="clean" description="clean up sub projects" >
+		<ant antfile="agent/native/build.xml" target="clean" inheritAll="false" />
+		<ant antfile="test/testapp/build.xml" target="clean" inheritAll="false" />
+	</target>
+
+</project>
+
