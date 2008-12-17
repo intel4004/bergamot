@@ -37,7 +37,9 @@
         </ccCompilerTool>
         <linkerTool>
           <linkerLibItems>
+            <linkerOptionItem>-lrt</linkerOptionItem>
           </linkerLibItems>
+          <commandLine>-pthread</commandLine>
         </linkerTool>
       </compileType>
       <item path="agent.cpp">

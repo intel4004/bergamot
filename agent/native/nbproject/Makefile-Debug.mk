@@ -41,7 +41,7 @@ CXXFLAGS=
 FFLAGS=
 
 # Link Libraries and Options
-LDLIBSOPTIONS=
+LDLIBSOPTIONS=-lrt
 
 # Build Targets
 .build-conf: ${BUILD_SUBPROJECTS}
@@ -49,7 +49,7 @@ LDLIBSOPTIONS=
 
 dist/Debug/${PLATFORM}/libnative.so: ${OBJECTFILES}
 	${MKDIR} -p dist/Debug/${PLATFORM}
-	${LINK.cc} -shared -o dist/Debug/${PLATFORM}/libnative.so -fPIC ${OBJECTFILES} ${LDLIBSOPTIONS} 
+	${LINK.cc} -pthread -shared -o dist/Debug/${PLATFORM}/libnative.so -fPIC ${OBJECTFILES} ${LDLIBSOPTIONS} 
 
 ${OBJECTDIR}/agent.o: agent.cpp 
 	${MKDIR} -p ${OBJECTDIR}

@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <pthread.h>
+#include <time.h>
+
 #include <jvmti.h>
 
 //#define ENABLE_TRACING
@@ -14,9 +17,154 @@
   #define TRACE(format, args...)
 #endif
 
+static JavaVM *jvm;
 static jvmtiEnv* jvmti;
 
-#define MAX_FRAMES 128
+
+long long getNanoTime() {
+    struct timespec currentTime;
+    if (clock_gettime( CLOCK_REALTIME, &currentTime ) == 0) {
+        return currentTime.tv_sec * 1000000000L + currentTime.tv_nsec;
+    }
+    return 0;
+}
+
+int usleep(long usec) {
+    struct timeval tv;
+    tv.tv_sec = usec / 1000000L;
+    tv.tv_usec = usec % 1000000L;
+    return select(0, 0, 0, 0, &tv);
+}
+
+#define MAX_FRAMES 256
+
+jint* index_buffer = new jint[1];
+jint index_size = 1;
+jint index_count = 0;
+
+void appendIndex(jint thread) {
+    if(index_count == index_size) {
+        jint* old = index_buffer;
+        index_buffer = new jint[index_size * 2];
+        index_size = index_size * 2;
+        for(int i = 0; i < index_count; i++) {
+            index_buffer[i] = old[i];
+        }
+        delete[] old;
+
+        TRACE("Growing thread buffer to %d", index_size);
+    }
+    index_buffer[index_count++] = thread;
+}
+
+jmethodID* method_buffer = new jmethodID[1];
+jint method_size = 1;
+jint method_count = 0;
+
+void appendMethod(jmethodID method) {
+    if(method_count == method_size) {
+        jmethodID* old = method_buffer;
+        method_buffer = new jmethodID[method_size * 2];
+        method_size = method_size * 2;
+        for(int i = 0; i < method_count; i++) {
+            method_buffer[i] = old[i];
+        }
+        delete[] old;
+
+        TRACE("Growing method buffer to %d", method_size);
+    }
+    method_buffer[method_count++] = method;
+}
+
+long long total = 0;
+long long count = 0;
+
+void recordStackDump(jvmtiEnv* jvmti) {
+
+    //long long before = getNanoTime();
+    
+    jvmtiStackInfo* stackInfo;
+    jint threadCount;
+    jvmtiError err;
+
+    err = jvmti->GetAllStackTraces(MAX_FRAMES, &stackInfo, &threadCount);
+    if (err != JVMTI_ERROR_NONE) {
+        ERROR("GetAllStackTraces failed with %d", err);
+        return;
+    }
+    
+    for (int ti = 0; ti < threadCount; ++ti) {
+        jvmtiStackInfo* infop = &stackInfo[ti];
+        jthread thread = infop->thread;
+        jvmtiFrameInfo* frames = infop->frame_buffer;
+
+        jvmtiThreadInfo thread_info;
+        err = jvmti->GetThreadInfo(thread, &thread_info);
+        if(err != JVMTI_ERROR_NONE) {
+           ERROR("GetMethodName failed with %d", err);
+           return;
+        }
+
+        if(infop->frame_count > 0) {
+            appendIndex(method_count);
+            for (int fi = 0; fi < infop->frame_count; fi++) {
+                appendMethod(frames[fi].method);
+            }
+        }
+    }
+    
+    err = jvmti->Deallocate((unsigned char*) stackInfo);    
+    
+    //long long after =  getNanoTime();
+    //total += after-before;
+    //count++;
+    //fprintf (stderr, "time = %lldns (%lldns avg)\n", after-before, total / count);
+}
+
+void dumpRecordedStackDumps(jvmtiEnv* jvmti) {
+    
+    jvmtiError err;
+
+    for(int i = 0; i < index_count; i++) {
+        int start = index_buffer[i];
+        int end = i == index_count - 1 ? method_count : index_buffer[i + 1];
+        for(int j = start; j < end; j++) {
+            char* name_ptr = NULL;
+            char* method_signature_ptr = NULL;
+            char* method_generic_ptr = NULL;
+
+            err = jvmti->GetMethodName(method_buffer[j], &name_ptr, &method_signature_ptr, &method_generic_ptr);
+            if(err !=  JVMTI_ERROR_NONE) {
+                ERROR("GetMethodName failed with %d", err);
+                break;
+            }
+
+            jclass klass;
+            err = jvmti->GetMethodDeclaringClass(method_buffer[j],  &klass);
+            if(err != JVMTI_ERROR_NONE) {
+               ERROR("GetMethodDeclaringClass failed with %d", err);
+               break;
+            }
+
+            char* class_signature_ptr;
+            char* class_generic_ptr;
+            err = jvmti->GetClassSignature(klass, &class_signature_ptr, &class_generic_ptr);
+            if(err != JVMTI_ERROR_NONE) {
+                ERROR("GetClassSignature failed with %d", err);
+                break;
+            }
+
+            char* source_name_ptr;
+            err = jvmti->GetSourceFileName(klass, &source_name_ptr);
+            if(err != JVMTI_ERROR_NONE) {
+                source_name_ptr = "<unknown>";
+            }
+
+            fprintf (stderr, "%s %s %s %s\n", class_signature_ptr, name_ptr, method_signature_ptr, source_name_ptr);
+        }
+        fprintf (stderr, "\n");
+    }
+}
 
 void printStackDump(jvmtiEnv* jvmti) {
 
@@ -30,67 +178,95 @@ void printStackDump(jvmtiEnv* jvmti) {
     }
 
     for (int ti = 0; ti < threadCount; ++ti) {
-       jvmtiStackInfo *infop = &stackInfo[ti];
-       jthread thread = infop->thread;
-       jint state = infop->state;
-       jvmtiFrameInfo *frames = infop->frame_buffer;
+        jvmtiStackInfo *infop = &stackInfo[ti];
+        jthread thread = infop->thread;
+        jint state = infop->state;
+        jvmtiFrameInfo *frames = infop->frame_buffer;
 
-       jvmtiThreadInfo thread_info;
-       err = jvmti->GetThreadInfo(thread, &thread_info);
-       if(err != JVMTI_ERROR_NONE) {
+        jvmtiThreadInfo thread_info;
+        err = jvmti->GetThreadInfo(thread, &thread_info);
+        if(err != JVMTI_ERROR_NONE) {
            ERROR("GetMethodName failed with %d", err);
            return;
-       }
+        }
 
-       fprintf (stderr, "THREAD %s %d\n", thread_info.name, state);
-       for (int fi = 0; fi < infop->frame_count; fi++) {
+        fprintf (stderr, "THREAD %s %d\n", thread_info.name, state);
+        for (int fi = 0; fi < infop->frame_count; fi++) {
 
-           char* name_ptr = NULL;
-           char* method_signature_ptr = NULL;
-           char* method_generic_ptr = NULL;
+            char* name_ptr = NULL;
+            char* method_signature_ptr = NULL;
+            char* method_generic_ptr = NULL;
 
-           err = jvmti->GetMethodName(frames[fi].method, &name_ptr, &method_signature_ptr, &method_generic_ptr);
-           if(err !=  JVMTI_ERROR_NONE) {
+            err = jvmti->GetMethodName(frames[fi].method, &name_ptr, &method_signature_ptr, &method_generic_ptr);
+            if(err !=  JVMTI_ERROR_NONE) {
               ERROR("GetMethodName failed with %d", err);
               break;
-           }
+            }
 
-           jclass klass;
-           err = jvmti->GetMethodDeclaringClass(frames[fi].method,  &klass);
-           if(err != JVMTI_ERROR_NONE) {
+            jclass klass;
+            err = jvmti->GetMethodDeclaringClass(frames[fi].method,  &klass);
+            if(err != JVMTI_ERROR_NONE) {
                ERROR("GetMethodDeclaringClass failed with %d", err);
                break;
-           }
+            }
 
-           char* class_signature_ptr;
-           char* class_generic_ptr;
-           err = jvmti->GetClassSignature(klass, &class_signature_ptr, &class_generic_ptr);
-           if(err != JVMTI_ERROR_NONE) {
+            char* class_signature_ptr;
+            char* class_generic_ptr;
+            err = jvmti->GetClassSignature(klass, &class_signature_ptr, &class_generic_ptr);
+            if(err != JVMTI_ERROR_NONE) {
                 ERROR("GetClassSignature failed with %d", err);
                 break;
-           }
+            }
 
-           char* source_name_ptr;
-           err = jvmti->GetSourceFileName(klass, &source_name_ptr);
-           if(err != JVMTI_ERROR_NONE) {
+            char* source_name_ptr;
+            err = jvmti->GetSourceFileName(klass, &source_name_ptr);
+            if(err != JVMTI_ERROR_NONE) {
                 ERROR("GetSourceFileName failed with %d", err);
                 break;
-           }
+            }
 
-           fprintf (stderr, "  FRAME %s %s %s %s:%d\n", class_signature_ptr, name_ptr, method_signature_ptr, source_name_ptr, frames[fi].location);
-       }
+            fprintf (stderr, "  FRAME %s %s %s %s:%d\n", class_signature_ptr, name_ptr, method_signature_ptr, source_name_ptr, frames[fi].location);
+        }
     }
 
     err = jvmti->Deallocate((unsigned char*) stackInfo);
 
 }
 
+pthread_t samplingThread;
+volatile bool isShutdown;
+
+void* runSamplingThread(void* tid) {
+    JNIEnv* jni;
+    jint res = jvm->AttachCurrentThreadAsDaemon((void**)&jni, NULL);
+    if(res) {
+        ERROR("AttachCurrentThreadAsDaemon failed with &d\n", res);
+        return NULL;
+    }
+    while(!isShutdown) {
+        recordStackDump(jvmti);
+        usleep(250000);
+    }
+
+    res = jvm->DetachCurrentThread();
+    if(res) {
+         ERROR("DetachCurrentThread failed with &d\n", res);
+    }
+
+    return NULL;
+}
+
 static void JNICALL
 VMInit(jvmtiEnv* jvmti, JNIEnv *env, jthread thread) {
     TRACE("VMInit");
 
-    printStackDump(jvmti);
-   
+    void* t;
+    isShutdown = false;
+    int result = pthread_create(&samplingThread, NULL, runSamplingThread, t);
+    if (result){
+        ERROR("pthread_create failed with %d\n", result);
+        return;
+    }
 }
 
 void JNICALL
@@ -99,8 +275,17 @@ VMStart(jvmtiEnv* jvmti_env, JNIEnv* jni_env) {
 }
 
 void JNICALL
-VMDeath(jvmtiEnv* jvmti_env, JNIEnv* jni_env) {
+VMDeath(jvmtiEnv* jvmti_env, JNIEnv* jni_env) {    
     TRACE("VMDeath");
+
+    isShutdown = true;
+    void* status;
+    int result = pthread_join(samplingThread, &status);
+    if (result) {
+        ERROR("pthread_join failed with %d\n", result);
+    }
+
+    dumpRecordedStackDumps(jvmti_env);
 }
 
 void JNICALL
@@ -127,7 +312,6 @@ ClassFileLoadHook(
     unsigned char** new_class_data)
 {
     TRACE("ClassFileLoadHook %s", name);
-    
 }
 
 void JNICALL
@@ -153,6 +337,8 @@ MonitorContendedEntered(jvmtiEnv* jvmti_env, JNIEnv* jni_env, jthread thread, jo
 JNIEXPORT jint JNICALL
 Agent_OnLoad(JavaVM *vm, char *options, void *reserved) {
     TRACE("Agent_OnLoad");
+
+    jvm = vm;
 
     jint result;
     result = vm->GetEnv((void**)&jvmti, JVMTI_VERSION);
